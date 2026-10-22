@@ -415,7 +415,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if self.serial_thread is None or not self.serial_thread.isRunning():
             self.on_error("Connect to the camera before capturing frames.")
             return
-        self.serial_thread.send_command(b"capture\n")
+        if not self.serial_thread.send_command(b"capture\n"):
+            self.on_error("Could not request a frame from the camera.")
+            return
         self.last_frame_received_at = time.monotonic()
         self.refresh_images_on_next_frame = True
         self.status_label.setText("Capture requested")
@@ -578,8 +580,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             img = image_frame_to_rgb(frame)
             if img is not None:
                 self.image_label.set_image(img)
-                self.save_image(img)
                 if self.refresh_images_on_next_frame:
+                    self.save_image(img)
                     self.refresh_images_on_next_frame = False
                     self.refresh_image_list()
             else:

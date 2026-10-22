@@ -3,6 +3,7 @@ import struct
 import numpy as np
 
 from rocci_xiao_sense_viewer.app import image_frame_to_rgb, rgb888_to_rgb565
+from rocci_xiao_sense_viewer.app import CapturedFrame, ViewerWindow
 from rocci_xiao_sense_viewer.parser import (
     BoxFrame,
     CommandPacket,
@@ -15,6 +16,81 @@ from rocci_xiao_sense_viewer.parser import (
 
 
 MAGIC = b"\xDE\xAD\xBE\xAF"
+
+
+def test_capture_frame_requests_one_frame_without_stopping_live_view():
+    class FakeSerialThread:
+        def __init__(self):
+            self.commands = []
+
+        def isRunning(self):
+            return True
+
+        def send_command(self, command):
+            self.commands.append(command)
+            return True
+
+    class FakeTimer:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    class FakeLabel:
+        def setText(self, _text):
+            pass
+
+    serial_thread = FakeSerialThread()
+    timer = FakeTimer()
+    window = type(
+        "CaptureWindow",
+        (),
+        {
+            "serial_thread": serial_thread,
+            "live_enabled": True,
+            "frame_timer": timer,
+            "refresh_images_on_next_frame": False,
+            "status_label": FakeLabel(),
+        },
+    )()
+
+    ViewerWindow.capture_frame(window)
+
+    assert serial_thread.commands == [b"capture\n"]
+    assert not timer.stopped
+    assert window.live_enabled
+    assert window.refresh_images_on_next_frame
+
+
+def test_live_frames_save_only_one_image_after_capture_request():
+    class FakeImageLabel:
+        def set_image(self, _image):
+            pass
+
+    class CaptureWindow:
+        refresh_images_on_next_frame = True
+        image_label = FakeImageLabel()
+
+        def __init__(self):
+            self.saved_images = []
+            self.refresh_count = 0
+
+        def save_image(self, image):
+            self.saved_images.append(image)
+
+        def refresh_image_list(self):
+            self.refresh_count += 1
+
+    window = CaptureWindow()
+    frame = ImageFrame(length=12, data=bytes(12), width=2, height=2, pixformat=5)
+    message = CapturedFrame("image", frame, 0)
+
+    ViewerWindow.handle_frame_message(window, message)
+    ViewerWindow.handle_frame_message(window, message)
+
+    assert len(window.saved_images) == 1
+    assert window.refresh_count == 1
 
 
 def test_parse_image_frame():
