@@ -11,6 +11,9 @@ MAGIC = b"\xDE\xAD\xBE\xAF"
 class ImageFrame:
     length: int
     data: bytes
+    width: int = 96
+    height: int = 96
+    pixformat: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -95,6 +98,28 @@ def parse_stream_incremental(data: bytes | Iterable[int]) -> tuple[List[object],
         if len(payload) - offset < 5:
             break
         frame_type = payload[offset + 4]
+
+        if frame_type == ord("F"):
+            header_size = 9
+            if len(payload) - offset - 5 < header_size:
+                break
+            width, height, pixformat, length = struct.unpack_from("<HHBI", payload, offset + 5)
+            data_start = offset + 5 + header_size
+            total = 5 + header_size + length
+            if len(payload) - offset < total:
+                break
+            image_data = payload[data_start:data_start + length]
+            frames.append(
+                ImageFrame(
+                    length=length,
+                    data=image_data,
+                    width=width,
+                    height=height,
+                    pixformat=pixformat,
+                )
+            )
+            offset += total
+            continue
 
         if frame_type == ord("I"):
             if len(payload) - offset - 5 < 4:

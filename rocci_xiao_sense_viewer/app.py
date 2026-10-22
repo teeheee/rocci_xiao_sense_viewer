@@ -25,6 +25,81 @@ from .parser import (
 )
 
 
+def image_frame_to_rgb(frame: ImageFrame) -> Optional[np.ndarray]:
+    width = frame.width
+    height = frame.height
+    if width <= 0 or height <= 0:
+        return None
+
+    if frame.pixformat == 0:  # PIXFORMAT_RGB565
+        expected = width * height * 2
+        if frame.length < expected:
+            return None
+        pixels = np.frombuffer(frame.data[:expected], dtype="<u2").astype(np.uint32)
+        red = ((pixels >> 11) & 0x1F) * 255 // 31
+        green = ((pixels >> 5) & 0x3F) * 255 // 63
+        blue = (pixels & 0x1F) * 255 // 31
+        return np.stack((red, green, blue), axis=-1).astype(np.uint8).reshape(height, width, 3)
+
+    if frame.pixformat == 1:  # PIXFORMAT_YUV422 (Y0, U, Y1, V)
+        expected = width * height * 2
+        if width % 2 or frame.length < expected:
+            return None
+        packed = np.frombuffer(frame.data[:expected], dtype=np.uint8).reshape(height, width // 2, 4).astype(np.int32)
+        y0 = packed[..., 0] - 16
+        u = packed[..., 1] - 128
+        y1 = packed[..., 2] - 16
+        v = packed[..., 3] - 128
+        rgb = np.empty((height, width, 3), dtype=np.uint8)
+        for column, luminance in ((0, y0), (1, y1)):
+            red = (298 * luminance + 409 * v + 128) >> 8
+            green = (298 * luminance - 100 * u - 208 * v + 128) >> 8
+            blue = (298 * luminance + 516 * u + 128) >> 8
+            rgb[:, column::2] = np.stack((red, green, blue), axis=-1).clip(0, 255).astype(np.uint8)
+        return rgb
+
+    if frame.pixformat == 2:  # PIXFORMAT_YUV420 (planar Y, U, V)
+        if width % 2 or height % 2:
+            return None
+        luma_size = width * height
+        chroma_size = luma_size // 4
+        if frame.length < luma_size + chroma_size * 2:
+            return None
+        pixels = np.frombuffer(frame.data[:luma_size + chroma_size * 2], dtype=np.uint8)
+        y = pixels[:luma_size].reshape(height, width).astype(np.int32) - 16
+        u = pixels[luma_size:luma_size + chroma_size].reshape(height // 2, width // 2)
+        v = pixels[luma_size + chroma_size:].reshape(height // 2, width // 2)
+        u = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1).astype(np.int32) - 128
+        v = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1).astype(np.int32) - 128
+        red = (298 * y + 409 * v + 128) >> 8
+        green = (298 * y - 100 * u - 208 * v + 128) >> 8
+        blue = (298 * y + 516 * u + 128) >> 8
+        return np.stack((red, green, blue), axis=-1).clip(0, 255).astype(np.uint8)
+
+    if frame.pixformat == 3:  # PIXFORMAT_GRAYSCALE
+        expected = width * height
+        if frame.length < expected:
+            return None
+        gray = np.frombuffer(frame.data[:expected], dtype=np.uint8).reshape(height, width)
+        return np.repeat(gray[:, :, None], 3, axis=2)
+
+    if frame.pixformat == 4:  # PIXFORMAT_JPEG
+        image = QtGui.QImage.fromData(frame.data)
+        if image.isNull() or image.width() != width or image.height() != height:
+            return None
+        image = image.convertToFormat(QtGui.QImage.Format_RGB888)
+        rows = np.frombuffer(image.bits(), dtype=np.uint8, count=image.sizeInBytes())
+        return rows.reshape(height, image.bytesPerLine())[:, :width * 3].reshape(height, width, 3).copy()
+
+    if frame.pixformat == 5:  # PIXFORMAT_RGB888
+        expected = width * height * 3
+        if frame.length < expected:
+            return None
+        return np.frombuffer(frame.data[:expected], dtype=np.uint8).reshape(height, width, 3).copy()
+
+    return None
+
+
 @dataclass
 class CapturedFrame:
     kind: str
@@ -335,15 +410,12 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.last_frame_received_at = time.monotonic()
         if payload.kind == "image":
             frame: ImageFrame = payload.payload
-            if len(frame.data) >= 96 * 96 * 2:
-                rgb = np.frombuffer(frame.data[:96 * 96 * 2], dtype=np.uint16).astype(np.uint32)
-                r5 = ((rgb >> 11) & 0x1F) << 3
-                g6 = ((rgb >> 5) & 0x3F) << 2
-                b5 = (rgb & 0x1F) << 3
-                rgb8 = np.stack([r5, g6, b5], axis=-1).astype(np.uint8)
-                img = rgb8.reshape((96, 96, 3))
+            img = image_frame_to_rgb(frame)
+            if img is not None:
                 self.image_label.set_image(img)
                 self.save_image(img)
+            else:
+                self.status_label.setText(f"Unsupported or invalid pixel format {frame.pixformat}")
         elif payload.kind == "overlay":
             overlay = payload.payload
             items = []
