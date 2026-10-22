@@ -100,6 +100,17 @@ def image_frame_to_rgb(frame: ImageFrame) -> Optional[np.ndarray]:
     return None
 
 
+def rgb888_to_rgb565(image: np.ndarray) -> Optional[bytes]:
+    pixels = np.asarray(image)
+    if pixels.shape != (96, 96, 3) or pixels.dtype != np.uint8:
+        return None
+    red = (pixels[:, :, 0].astype(np.uint16) * 31 + 127) // 255
+    green = (pixels[:, :, 1].astype(np.uint16) * 63 + 127) // 255
+    blue = (pixels[:, :, 2].astype(np.uint16) * 31 + 127) // 255
+    packed = (red << 11) | (green << 5) | blue
+    return packed.astype(">u2").tobytes()
+
+
 @dataclass
 class CapturedFrame:
     kind: str
@@ -170,6 +181,15 @@ class SerialThread(QtCore.QThread):
             self.serial.flush()
         return True
 
+    def send_process_frame(self, image_data: bytes) -> bool:
+        if self.serial is None or not self.serial.is_open or len(image_data) != 96 * 96 * 2:
+            return False
+        with self._lock:
+            self.serial.write(b"process\n")
+            self.serial.write(image_data)
+            self.serial.flush()
+        return True
+
     def stop(self):
         self._running = False
         if self.serial is not None and self.serial.is_open:
@@ -229,6 +249,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.capture_dir = Path.cwd() / "captures"
         self.capture_dir.mkdir(exist_ok=True)
         self.live_enabled = False
+        self.camera_halted = False
+        self._resume_live_after_go = False
         self.loaded_frames: list[tuple[str, object]] = []
         self.loaded_image_index = 0
         self.last_frame_received_at = 0.0
@@ -247,11 +269,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.disconnect_btn = QtWidgets.QPushButton("Disconnect")
         self.capture_btn = QtWidgets.QPushButton("Capture frame")
         self.process_btn = QtWidgets.QPushButton("Process on chip")
+        self.halt_btn = QtWidgets.QPushButton("Halt camera")
+        self.go_btn = QtWidgets.QPushButton("Go")
         self.live_btn = QtWidgets.QPushButton("Live view")
         self.load_btn = QtWidgets.QPushButton("Load frames")
         self.status_label = QtWidgets.QLabel("Disconnected")
 
-        for btn in [self.refresh_btn, self.connect_btn, self.disconnect_btn, self.capture_btn, self.process_btn, self.live_btn, self.load_btn]:
+        for btn in [self.refresh_btn, self.connect_btn, self.disconnect_btn, self.capture_btn, self.process_btn, self.halt_btn, self.go_btn, self.live_btn, self.load_btn]:
             btn.setMinimumHeight(32)
 
         top.addWidget(self.port_combo)
@@ -260,6 +284,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         top.addWidget(self.disconnect_btn)
         top.addWidget(self.capture_btn)
         top.addWidget(self.process_btn)
+        top.addWidget(self.halt_btn)
+        top.addWidget(self.go_btn)
         top.addWidget(self.live_btn)
         top.addWidget(self.load_btn)
         top.addWidget(self.status_label)
@@ -287,6 +313,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.disconnect_btn.clicked.connect(self.disconnect_from_port)
         self.capture_btn.clicked.connect(self.capture_frame)
         self.process_btn.clicked.connect(self.process_loaded_frames)
+        self.halt_btn.clicked.connect(self.halt_camera)
+        self.go_btn.clicked.connect(self.go_camera)
         self.live_btn.clicked.connect(self.toggle_live_view)
         self.load_btn.clicked.connect(self.load_frames_from_folder)
         self.file_list.itemClicked.connect(self.show_selected_frame)
@@ -345,15 +373,55 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.last_frame_received_at = time.monotonic()
         self.status_label.setText("Capture requested")
 
+    def halt_camera(self):
+        if self.serial_thread is None or not self.serial_thread.isRunning():
+            self.on_error("Connect to the camera before halting it.")
+            return
+        if self.camera_halted:
+            return
+        self._resume_live_after_go = self.live_enabled
+        self.live_enabled = False
+        self.frame_timer.stop()
+        if self.serial_thread.send_command(b"halt\n"):
+            self.camera_halted = True
+            self.status_label.setText("Camera halted")
+
+    def go_camera(self):
+        if self.serial_thread is None or not self.serial_thread.isRunning():
+            self.on_error("Connect to the camera before resuming it.")
+            return
+        if not self.camera_halted:
+            return
+        if not self.serial_thread.send_command(b"go\n"):
+            return
+        self.camera_halted = False
+        if self._resume_live_after_go:
+            self.serial_thread.send_command(b"start\n")
+            self.live_enabled = True
+            self.last_frame_received_at = time.monotonic()
+            self.frame_timer.start()
+        self._resume_live_after_go = False
+        self.status_label.setText("Camera resumed")
+
     def process_loaded_frames(self):
         if self.serial_thread is None or not self.serial_thread.isRunning():
             self.on_error("Connect to the camera before processing frames.")
             return
-        for _, frame in self.loaded_frames:
-            if isinstance(frame, np.ndarray):
-                self.serial_thread.send_command(b"process\n")
-                self.status_label.setText("Processing loaded frame(s) on chip")
-                break
+        if not self.loaded_frames:
+            self.status_label.setText("Load a frame before processing")
+            return
+        index = self.file_list.currentRow()
+        if index < 0:
+            index = 0
+        _, frame = self.loaded_frames[index]
+        image_data = rgb888_to_rgb565(frame)
+        if image_data is None:
+            self.status_label.setText("Chip processing requires a 96x96 RGB image")
+            return
+        if self.serial_thread.send_process_frame(image_data):
+            self.status_label.setText("Processing frame on chip")
+        else:
+            self.on_error("Could not send the complete frame to the camera.")
 
     def _maintain_live_view(self):
         if not self.live_enabled or self.serial_thread is None or not self.serial_thread.isRunning():
@@ -366,6 +434,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
     def toggle_live_view(self):
         if self.serial_thread is None or not self.serial_thread.isRunning():
             self.on_error("Connect to the camera before enabling live view.")
+            return
+        if self.camera_halted:
+            self.status_label.setText("Resume the camera before changing live view")
             return
         self.live_enabled = not self.live_enabled
         cmd = b"start\n" if self.live_enabled else b"stop\n"

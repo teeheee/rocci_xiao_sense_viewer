@@ -2,7 +2,7 @@ import struct
 
 import numpy as np
 
-from rocci_xiao_sense_viewer.app import image_frame_to_rgb
+from rocci_xiao_sense_viewer.app import image_frame_to_rgb, rgb888_to_rgb565
 from rocci_xiao_sense_viewer.parser import (
     BoxFrame,
     CommandPacket,
@@ -52,6 +52,24 @@ def test_decode_rgb565_uses_frame_dimensions():
 
     assert rgb.shape == (1, 2, 3)
     np.testing.assert_array_equal(rgb, [[[255, 0, 0], [0, 255, 0]]])
+
+
+def test_process_frame_conversion_emits_camera_rgb565_wire_order():
+    image = np.zeros((96, 96, 3), dtype=np.uint8)
+    image[0, 0] = [255, 0, 0]
+    image[0, 1] = [0, 255, 0]
+
+    payload = rgb888_to_rgb565(image)
+
+    assert payload is not None
+    assert len(payload) == 96 * 96 * 2
+    assert payload[:4] == bytes([0xF8, 0x00, 0x07, 0xE0])
+
+
+def test_process_frame_conversion_rejects_unsupported_size():
+    image = np.zeros((48, 48, 3), dtype=np.uint8)
+
+    assert rgb888_to_rgb565(image) is None
 
 
 def test_decode_yuv422_uses_wide_color_arithmetic():
