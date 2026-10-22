@@ -35,7 +35,7 @@ def image_frame_to_rgb(frame: ImageFrame) -> Optional[np.ndarray]:
         expected = width * height * 2
         if frame.length < expected:
             return None
-        pixels = np.frombuffer(frame.data[:expected], dtype="<u2").astype(np.uint32)
+        pixels = np.frombuffer(frame.data[:expected], dtype=">u2").astype(np.uint32)
         red = ((pixels >> 11) & 0x1F) * 255 // 31
         green = ((pixels >> 5) & 0x3F) * 255 // 63
         blue = (pixels & 0x1F) * 255 // 31

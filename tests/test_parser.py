@@ -45,7 +45,7 @@ def test_parse_frame_with_dimensions_and_pixformat():
 
 
 def test_decode_rgb565_uses_frame_dimensions():
-    pixels = struct.pack("<HH", 0xF800, 0x07E0)
+    pixels = bytes([0xF8, 0x00, 0x07, 0xE0])
     frame = ImageFrame(length=len(pixels), data=pixels, width=2, height=1, pixformat=0)
 
     rgb = image_frame_to_rgb(frame)
