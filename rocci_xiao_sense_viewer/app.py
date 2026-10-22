@@ -38,13 +38,14 @@ class SerialThread(QtCore.QThread):
     error = QtCore.Signal(str)
     status = QtCore.Signal(str)
 
-    def __init__(self, port: str, baudrate: int = 115200):
+    def __init__(self, port: str, baudrate: int = 921600):
         super().__init__()
         self.port = port
         self.baudrate = baudrate
         self.serial: Optional[serial.Serial] = None
         self._running = False
         self._buffer = bytearray()
+        self._lock = threading.Lock()
 
     def run(self):
         self._running = True
@@ -86,10 +87,20 @@ class SerialThread(QtCore.QThread):
             self.serial.close()
             self.serial = None
 
+    def send_command(self, command: bytes | str) -> bool:
+        if self.serial is None or not self.serial.is_open:
+            return False
+        data = command if isinstance(command, bytes) else command.encode("utf-8")
+        with self._lock:
+            self.serial.write(data)
+            self.serial.flush()
+        return True
+
     def stop(self):
         self._running = False
         if self.serial is not None and self.serial.is_open:
-            self.serial.close()
+            with self._lock:
+                self.serial.close()
 
 
 class ImageLabel(QtWidgets.QLabel):
@@ -146,6 +157,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.live_enabled = False
         self.loaded_frames: list[tuple[str, object]] = []
         self.loaded_image_index = 0
+        self.last_frame_received_at = 0.0
+        self.frame_timer = QtCore.QTimer(self)
+        self.frame_timer.setInterval(1000)
+        self.frame_timer.timeout.connect(self._maintain_live_view)
 
         widget = QtWidgets.QWidget()
         self.setCentralWidget(widget)
@@ -221,14 +236,18 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.status_label.setText("Already connected")
             return
 
-        self.serial_thread = SerialThread(port)
+        self.serial_thread = SerialThread(port, baudrate=921600)
         self.serial_thread.message_received.connect(self.handle_frame_message)
         self.serial_thread.terminal_received.connect(self.append_terminal_output)
         self.serial_thread.error.connect(self.on_error)
         self.serial_thread.status.connect(self.status_label.setText)
         self.serial_thread.start()
+        self.last_frame_received_at = time.monotonic()
+        self.frame_timer.start()
 
     def disconnect_from_port(self):
+        self.frame_timer.stop()
+        self.live_enabled = False
         if self.serial_thread is not None:
             self.serial_thread.stop()
             self.serial_thread.wait(1000)
@@ -248,7 +267,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if self.serial_thread is None or not self.serial_thread.isRunning():
             self.on_error("Connect to the camera before capturing frames.")
             return
-        self.serial_thread.serial.write(b"capture\n")
+        self.serial_thread.send_command(b"capture\n")
+        self.last_frame_received_at = time.monotonic()
         self.status_label.setText("Capture requested")
 
     def process_loaded_frames(self):
@@ -257,9 +277,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
             return
         for _, frame in self.loaded_frames:
             if isinstance(frame, np.ndarray):
-                self.serial_thread.serial.write(b"process\n")
+                self.serial_thread.send_command(b"process\n")
                 self.status_label.setText("Processing loaded frame(s) on chip")
                 break
+
+    def _maintain_live_view(self):
+        if not self.live_enabled or self.serial_thread is None or not self.serial_thread.isRunning():
+            return
+        if time.monotonic() - self.last_frame_received_at >= 1.0:
+            self.serial_thread.send_command(b"capture\n")
+            self.last_frame_received_at = time.monotonic()
+            self.status_label.setText("Live view active (1 FPS)")
 
     def toggle_live_view(self):
         if self.serial_thread is None or not self.serial_thread.isRunning():
@@ -267,7 +295,12 @@ class ViewerWindow(QtWidgets.QMainWindow):
             return
         self.live_enabled = not self.live_enabled
         cmd = b"start\n" if self.live_enabled else b"stop\n"
-        self.serial_thread.serial.write(cmd)
+        self.serial_thread.send_command(cmd)
+        if self.live_enabled:
+            self.last_frame_received_at = time.monotonic()
+            self.frame_timer.start()
+        else:
+            self.frame_timer.stop()
         self.status_label.setText("Live view enabled" if self.live_enabled else "Live view disabled")
 
     def load_frames_from_folder(self):
@@ -300,6 +333,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 break
 
     def handle_frame_message(self, payload: CapturedFrame):
+        self.last_frame_received_at = time.monotonic()
         if payload.kind == "image":
             frame: ImageFrame = payload.payload
             if len(frame.data) >= 96 * 96 * 2:

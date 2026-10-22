@@ -7,8 +7,8 @@ import serial
 from .parser import CommandPacket, parse_command, parse_stream
 
 
-def send_command(port: str, command: str) -> CommandPacket:
-    with serial.Serial(port, 115200, timeout=1) as ser:
+def send_command(port: str, command: str, baudrate: int = 921600) -> CommandPacket:
+    with serial.Serial(port, baudrate, timeout=1) as ser:
         ser.write((command + "\n").encode("utf-8"))
         ser.flush()
         response = ser.readline().strip()
@@ -17,9 +17,9 @@ def send_command(port: str, command: str) -> CommandPacket:
     return parse_command(response)
 
 
-def dump_frames(port: str) -> list:
+def dump_frames(port: str, baudrate: int = 921600) -> list:
     frames = []
-    with serial.Serial(port, 115200, timeout=0.2) as ser:
+    with serial.Serial(port, baudrate, timeout=0.2) as ser:
         while True:
             chunk = ser.read(4096)
             if not chunk:
