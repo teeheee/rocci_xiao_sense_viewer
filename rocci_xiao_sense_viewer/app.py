@@ -200,8 +200,10 @@ class SerialThread(QtCore.QThread):
 class ImageLabel(QtWidgets.QLabel):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(320, 240)
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setContentsMargins(0, 0, 0, 0)
         self.setStyleSheet("QLabel { background-color: black; border: 1px solid #444; }")
         self._image = None
         self._overlay_items = []
@@ -221,9 +223,10 @@ class ImageLabel(QtWidgets.QLabel):
             h, w, ch = self._image.shape
             qimage = QtGui.QImage(self._image.data, w, h, w * ch, QtGui.QImage.Format_RGB888)
             pixmap = QtGui.QPixmap.fromImage(qimage)
-            scaled = pixmap.scaled(self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
+            target = self.contentsRect()
+            scaled = pixmap.scaled(target.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            x = target.x() + (target.width() - scaled.width()) // 2
+            y = target.y() + (target.height() - scaled.height()) // 2
             qp.drawPixmap(x, y, scaled)
 
         pen = QtGui.QPen(QtGui.QColor('#ff0000'))
@@ -251,7 +254,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.live_enabled = False
         self.camera_halted = False
         self._resume_live_after_go = False
-        self.loaded_frames: list[tuple[str, object]] = []
+        self.loaded_frames: list[tuple[Path, np.ndarray]] = []
+        self.extra_image_dirs: list[Path] = []
+        self.refresh_images_on_next_frame = False
         self.loaded_image_index = 0
         self.last_frame_received_at = 0.0
         self.frame_timer = QtCore.QTimer(self)
@@ -261,8 +266,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         widget = QtWidgets.QWidget()
         self.setCentralWidget(widget)
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout()
+        top.setSpacing(8)
         self.port_combo = QtWidgets.QComboBox()
         self.refresh_btn = QtWidgets.QPushButton("Refresh ports")
         self.connect_btn = QtWidgets.QPushButton("Connect")
@@ -273,40 +281,73 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.go_btn = QtWidgets.QPushButton("Go")
         self.live_btn = QtWidgets.QPushButton("Live view")
         self.load_btn = QtWidgets.QPushButton("Load frames")
+        self.refresh_images_btn = QtWidgets.QPushButton("Refresh images")
         self.status_label = QtWidgets.QLabel("Disconnected")
 
-        for btn in [self.refresh_btn, self.connect_btn, self.disconnect_btn, self.capture_btn, self.process_btn, self.halt_btn, self.go_btn, self.live_btn, self.load_btn]:
-            btn.setMinimumHeight(32)
+        connection_group = QtWidgets.QGroupBox("Connection")
+        connection_layout = QtWidgets.QGridLayout(connection_group)
+        connection_layout.setContentsMargins(10, 8, 10, 8)
+        connection_layout.addWidget(self.port_combo, 0, 0, 1, 2)
+        connection_layout.addWidget(self.refresh_btn, 0, 2)
+        connection_layout.addWidget(self.connect_btn, 1, 0)
+        connection_layout.addWidget(self.disconnect_btn, 1, 1)
+        connection_layout.addWidget(self.status_label, 1, 2)
+        top.addWidget(connection_group, 3)
 
-        top.addWidget(self.port_combo)
-        top.addWidget(self.refresh_btn)
-        top.addWidget(self.connect_btn)
-        top.addWidget(self.disconnect_btn)
-        top.addWidget(self.capture_btn)
-        top.addWidget(self.process_btn)
-        top.addWidget(self.halt_btn)
-        top.addWidget(self.go_btn)
-        top.addWidget(self.live_btn)
-        top.addWidget(self.load_btn)
-        top.addWidget(self.status_label)
+        camera_group = QtWidgets.QGroupBox("Camera")
+        camera_layout = QtWidgets.QHBoxLayout(camera_group)
+        camera_layout.setContentsMargins(10, 8, 10, 8)
+        camera_layout.addWidget(self.live_btn)
+        camera_layout.addWidget(self.halt_btn)
+        camera_layout.addWidget(self.go_btn)
+        top.addWidget(camera_group, 2)
         layout.addLayout(top)
 
         mid = QtWidgets.QHBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(8)
         self.image_label = ImageLabel()
+        self.image_label.setObjectName("imageView")
         self.terminal_box = QtWidgets.QPlainTextEdit()
         self.terminal_box.setReadOnly(True)
         self.terminal_box.setPlaceholderText("Terminal output will appear here...")
-        self.terminal_box.setMinimumWidth(360)
-        mid.addWidget(self.image_label, 3)
-        mid.addWidget(self.terminal_box, 1)
-        layout.addLayout(mid)
+        self.terminal_box.setMinimumWidth(230)
+        self.auto_clear_terminal = QtWidgets.QCheckBox("Auto-clear each frame")
+        self.clear_terminal_btn = QtWidgets.QPushButton("Clear")
+        terminal_group = QtWidgets.QGroupBox("Terminal")
+        terminal_layout = QtWidgets.QVBoxLayout(terminal_group)
+        terminal_header = QtWidgets.QHBoxLayout()
+        terminal_header.addWidget(self.auto_clear_terminal)
+        terminal_header.addStretch(1)
+        terminal_header.addWidget(self.clear_terminal_btn)
+        terminal_layout.addLayout(terminal_header)
+        terminal_layout.addWidget(self.terminal_box)
+        mid.addWidget(self.image_label, 5)
+        mid.addWidget(terminal_group, 2)
+        layout.addLayout(mid, 6)
 
-        bottom = QtWidgets.QHBoxLayout()
+        frames_group = QtWidgets.QGroupBox("Frames")
+        frames_layout = QtWidgets.QVBoxLayout(frames_group)
+        frames_layout.setContentsMargins(10, 8, 10, 8)
+        frames_actions = QtWidgets.QHBoxLayout()
+        frames_actions.addWidget(self.capture_btn)
+        frames_actions.addWidget(self.load_btn)
+        frames_actions.addWidget(self.refresh_images_btn)
+        frames_actions.addWidget(self.process_btn)
+        frames_actions.addStretch(1)
+        frames_layout.addLayout(frames_actions)
         self.file_list = QtWidgets.QListWidget()
-        self.file_list.setMinimumHeight(160)
+        self.file_list.setMinimumHeight(96)
         self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        bottom.addWidget(self.file_list)
-        layout.addLayout(bottom)
+        self.file_list.setViewMode(QtWidgets.QListView.IconMode)
+        self.file_list.setFlow(QtWidgets.QListView.LeftToRight)
+        self.file_list.setWrapping(False)
+        self.file_list.setResizeMode(QtWidgets.QListView.Adjust)
+        self.file_list.setMovement(QtWidgets.QListView.Static)
+        self.file_list.setIconSize(QtCore.QSize(64, 64))
+        self.file_list.setGridSize(QtCore.QSize(112, 90))
+        frames_layout.addWidget(self.file_list)
+        layout.addWidget(frames_group, 2)
 
         self.refresh_btn.clicked.connect(self.refresh_ports)
         self.connect_btn.clicked.connect(self.connect_to_port)
@@ -317,9 +358,12 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.go_btn.clicked.connect(self.go_camera)
         self.live_btn.clicked.connect(self.toggle_live_view)
         self.load_btn.clicked.connect(self.load_frames_from_folder)
+        self.refresh_images_btn.clicked.connect(self.refresh_image_list)
+        self.clear_terminal_btn.clicked.connect(self.terminal_box.clear)
         self.file_list.itemClicked.connect(self.show_selected_frame)
 
         self.refresh_ports()
+        self.refresh_image_list()
 
     def refresh_ports(self):
         self.port_combo.clear()
@@ -359,6 +403,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
     def append_terminal_output(self, text: str):
         if not text:
             return
+        if self.auto_clear_terminal.isChecked() and text.startswith("Processing image of size"):
+            self.terminal_box.clear()
         self.terminal_box.appendPlainText(text)
 
     def on_error(self, text: str):
@@ -371,6 +417,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             return
         self.serial_thread.send_command(b"capture\n")
         self.last_frame_received_at = time.monotonic()
+        self.refresh_images_on_next_frame = True
         self.status_label.setText("Capture requested")
 
     def halt_camera(self):
@@ -452,30 +499,77 @@ class ViewerWindow(QtWidgets.QMainWindow):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select frame folder")
         if not folder:
             return
+        selected_dir = Path(folder).resolve()
+        if selected_dir not in self.extra_image_dirs:
+            self.extra_image_dirs.append(selected_dir)
+        self.refresh_image_list()
+
+    def refresh_image_list(self):
+        directories = [Path.cwd(), self.capture_dir, *self.extra_image_dirs]
+        image_paths = set()
+        for directory in directories:
+            if directory.is_dir():
+                image_paths.update(
+                    path.resolve()
+                    for path in directory.iterdir()
+                    if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".npy"}
+                )
+
         self.file_list.clear()
         self.loaded_frames = []
-        for path in sorted(Path(folder).iterdir()):
-            if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".npy"}:
-                item = QtWidgets.QListWidgetItem(path.name)
-                self.file_list.addItem(item)
-                if path.suffix.lower() == ".npy":
-                    data = np.load(path)
-                    self.loaded_frames.append((path.name, data))
-                else:
-                    image = QtGui.QImage(str(path))
-                    arr = np.array(image.convertToFormat(QtGui.QImage.Format_RGB888).bits()).reshape(image.height(), image.width(), 3)
-                    self.loaded_frames.append((path.name, arr))
+        for path in sorted(image_paths, key=lambda value: (value.name.lower(), str(value).lower())):
+            image = self._read_image(path)
+            if image is None:
+                continue
+            self.loaded_frames.append((path, image))
+            qimage = QtGui.QImage(image.data, image.shape[1], image.shape[0], image.shape[1] * 3, QtGui.QImage.Format_RGB888).copy()
+            pixmap = QtGui.QPixmap.fromImage(qimage).scaled(
+                self.file_list.iconSize(),
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation,
+            )
+            item = QtWidgets.QListWidgetItem(QtGui.QIcon(pixmap), path.name)
+            item.setToolTip(str(path))
+            item.setData(QtCore.Qt.UserRole, str(path))
+            self.file_list.addItem(item)
+
         if not self.loaded_frames:
-            self.status_label.setText("No valid image frames found")
+            self.file_list.setToolTip(f"No images found in {Path.cwd()}")
+        else:
+            self.file_list.setToolTip("")
+
+    def _read_image(self, path: Path) -> Optional[np.ndarray]:
+        try:
+            if path.suffix.lower() == ".npy":
+                image = np.load(path)
+                if image.ndim == 2:
+                    image = np.repeat(image[:, :, None], 3, axis=2)
+                elif image.ndim == 3 and image.shape[2] >= 3:
+                    image = image[:, :, :3]
+                else:
+                    return None
+                if image.dtype != np.uint8:
+                    image = np.clip(image, 0, 255).astype(np.uint8)
+                return image
+
+            qimage = QtGui.QImage(str(path))
+            if qimage.isNull():
+                return None
+            qimage = qimage.convertToFormat(QtGui.QImage.Format_RGB888)
+            rows = np.frombuffer(qimage.bits(), dtype=np.uint8, count=qimage.sizeInBytes())
+            return rows.reshape(qimage.height(), qimage.bytesPerLine())[:, :qimage.width() * 3].reshape(
+                qimage.height(), qimage.width(), 3
+            ).copy()
+        except (OSError, ValueError):
+            return None
 
     def show_selected_frame(self, item):
-        name = item.text()
-        for file_name, frame in self.loaded_frames:
-            if file_name == name:
-                if isinstance(frame, np.ndarray):
-                    self.image_label.set_image(frame)
-                    self.image_label.set_overlay_items([])
-                break
+        row = self.file_list.row(item)
+        if 0 <= row < len(self.loaded_frames):
+            _, frame = self.loaded_frames[row]
+            self.loaded_image_index = row
+            self.image_label.set_image(frame)
+            self.image_label.set_overlay_items([])
 
     def handle_frame_message(self, payload: CapturedFrame):
         self.last_frame_received_at = time.monotonic()
@@ -485,6 +579,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
             if img is not None:
                 self.image_label.set_image(img)
                 self.save_image(img)
+                if self.refresh_images_on_next_frame:
+                    self.refresh_images_on_next_frame = False
+                    self.refresh_image_list()
             else:
                 self.status_label.setText(f"Unsupported or invalid pixel format {frame.pixformat}")
         elif payload.kind == "overlay":
