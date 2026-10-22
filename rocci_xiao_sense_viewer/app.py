@@ -21,7 +21,7 @@ from .parser import (
     LineFrame,
     PointFrame,
     TerminalFrame,
-    parse_stream,
+    parse_stream_incremental,
 )
 
 
@@ -66,9 +66,8 @@ class SerialThread(QtCore.QThread):
                 if not chunk:
                     continue
                 self._buffer.extend(chunk)
-                frames = parse_stream(self._buffer)
-                if frames:
-                    self._buffer = bytearray()
+                frames, remainder = parse_stream_incremental(self._buffer)
+                self._buffer = bytearray(remainder)
                 for frame in frames:
                     if isinstance(frame, ImageFrame):
                         self.message_received.emit(CapturedFrame("image", frame, time.time()))

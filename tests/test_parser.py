@@ -7,6 +7,7 @@ from rocci_xiao_sense_viewer.parser import (
     TerminalFrame,
     parse_command,
     parse_stream,
+    parse_stream_incremental,
 )
 
 
@@ -39,6 +40,38 @@ def test_parse_box_frame():
     assert len(frames) == 1
     assert isinstance(frames[0], BoxFrame)
     assert frames[0] == box
+
+
+def test_incremental_parser_preserves_fragmented_image_after_terminal_frame():
+    image_data = bytes(range(8))
+    image_packet = MAGIC + b"I" + struct.pack("<I", len(image_data)) + image_data
+    first_chunk = MAGIC + b"Tready" + image_packet[:12]
+
+    frames, remainder = parse_stream_incremental(first_chunk)
+
+    assert frames == [TerminalFrame(message="ready")]
+    assert remainder == image_packet[:12]
+
+    frames, remainder = parse_stream_incremental(remainder + image_packet[12:])
+
+    assert frames == [ImageFrame(length=len(image_data), data=image_data)]
+    assert remainder == b""
+
+
+def test_incremental_parser_preserves_magic_split_after_terminal_frame():
+    image_data = b"pixels"
+    image_packet = MAGIC + b"I" + struct.pack("<I", len(image_data)) + image_data
+    first_chunk = MAGIC + b"Tready" + MAGIC[:2]
+
+    frames, remainder = parse_stream_incremental(first_chunk)
+
+    assert frames == [TerminalFrame(message="ready")]
+    assert remainder == MAGIC[:2]
+
+    frames, remainder = parse_stream_incremental(remainder + image_packet[2:])
+
+    assert frames == [ImageFrame(length=len(image_data), data=image_data)]
+    assert remainder == b""
 
 
 def test_parse_command_packet():

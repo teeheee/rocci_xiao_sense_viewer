@@ -69,6 +69,11 @@ def parse_command(raw: bytes | str) -> CommandPacket:
 
 
 def parse_stream(data: bytes | Iterable[int]) -> List[object]:
+    frames, _ = parse_stream_incremental(data)
+    return frames
+
+
+def parse_stream_incremental(data: bytes | Iterable[int]) -> tuple[List[object], bytes]:
     payload = bytes(data)
     frames: List[object] = []
     offset = 0
@@ -79,6 +84,10 @@ def parse_stream(data: bytes | Iterable[int]) -> List[object]:
         if payload[offset:offset + 4] != MAGIC:
             next_magic = payload.find(MAGIC, offset + 1)
             if next_magic == -1:
+                suffix_length = min(len(payload) - offset, len(MAGIC) - 1)
+                while suffix_length and payload[-suffix_length:] != MAGIC[:suffix_length]:
+                    suffix_length -= 1
+                offset = len(payload) - suffix_length
                 break
             offset = next_magic
             continue
@@ -102,8 +111,13 @@ def parse_stream(data: bytes | Iterable[int]) -> List[object]:
         if frame_type == ord("T"):
             next_magic = payload.find(MAGIC, offset + 5)
             if next_magic == -1:
-                text = payload[offset + 5:].decode("utf-8", errors="replace")
+                suffix_length = min(len(payload) - offset - 5, len(MAGIC) - 1)
+                while suffix_length and payload[-suffix_length:] != MAGIC[:suffix_length]:
+                    suffix_length -= 1
+                text_end = len(payload) - suffix_length
+                text = payload[offset + 5:text_end].decode("utf-8", errors="replace")
                 frames.append(TerminalFrame(message=text))
+                offset = text_end
                 break
             text = payload[offset + 5:next_magic].decode("utf-8", errors="replace")
             frames.append(TerminalFrame(message=text))
@@ -139,7 +153,7 @@ def parse_stream(data: bytes | Iterable[int]) -> List[object]:
 
         offset += 1
 
-    return frames
+    return frames, payload[offset:]
 
 
 def parse_serial_bytes(data: bytes) -> List[object]:
